@@ -1,7 +1,9 @@
 import gradio as gr
+import torch
 from PIL import Image
 import numpy as np
 import os
+import gc
 
 from biggan import BigGAN
 from gan import GAN
@@ -10,10 +12,11 @@ from remove_bg import get_remove_bg_model, remove_bg
 from item import UnsavedItem, Item
 import util
 from anims import Anim
+from pipeline import generate_from_config
 
-gan = BigGAN()
+gan = BigGAN(256)
 upsampler = get_real_esrgan().cpu()
-bg_remove_model = get_remove_bg_model().cpu()
+session = get_remove_bg_model()
 
 unsaved_items = []
 saved_items = [Item(i) for i in util.get_saved_item_ids()]
@@ -66,13 +69,20 @@ with (gr.Blocks() as demo):
         def letsgo(trunc, zmul, cmul, classes, batch_size, reps, use_upscale, use_bg_remove, progress=gr.Progress()):
             global image_list, gen_idx, selected_idx
 
-            if use_upscale:
-                upsampler.to(util.device)
-            if use_bg_remove:
-                bg_remove_model.to(util.device)
-
             ctr = 0
             progress((0, reps * batch_size))
+            last_desc = ""
+
+            def ctr_callback(x=None):
+                nonlocal ctr, last_desc
+                if isinstance(x, str):
+                    last_desc = x
+                else:
+                    if x is None:
+                        ctr += 1
+                    else:
+                        ctr += x
+                progress((ctr, reps * batch_size), desc=last_desc)
 
             selected_idx = None
 
@@ -93,38 +103,13 @@ with (gr.Blocks() as demo):
 
                 zs = gan.get_z(batch_size, classes=[i for i in classes.split(",") if len(i) > 0], z_mul=zmul,
                                class_mul=cmul, trunc=trunc)
-                imgs = gan.generate(zs, batch_size, truncation=trunc)
 
-                if use_upscale:
-                    upsampled = []
-                    for i in range(batch_size):
-                        progress((ctr, reps * batch_size), desc="Upscaling")
-                        x = upsampler.enhance(np.array(imgs[i]))
-                        upsampled.append(Image.fromarray(x))
-                        ctr += 1
-                    imgs = upsampled
-                else:
-                    ctr += batch_size
-                progress((ctr, reps * batch_size))
-
-                if use_bg_remove:
-                    bg_removed = []
-                    for i in range(batch_size):
-                        bg_removed.append(remove_bg(bg_remove_model, imgs[i]))
-                    imgs = bg_removed
+                imgs = generate_from_config(config, zs, gan, upsampler, session, batch_size, ctr_callback)
 
                 for i in range(batch_size):
                     uitem = UnsavedItem(gen_idx, zs[i], imgs[i], config)
                     unsaved_items.insert(0, uitem)
                     gen_idx += 1
-
-                # image_list += imgs
-                # image_list = imgs + image_list
-
-            if use_upscale:
-                upsampler.cpu()
-            if use_bg_remove:
-                bg_remove_model.cpu()
 
             return [i.img_path for i in unsaved_items]
 
@@ -169,8 +154,9 @@ with (gr.Blocks() as demo):
                         batch_size2 = gr.Slider(1, 32, step=1, label="Batch size", show_label=True, value=4)
 
                     with gr.Row():
-                        nframes = gr.Slider(1, 100, step=1, label="Num frames", show_label=True, value=24)
-                        fps = gr.Slider(1, 100, step=1, label="FPS", show_label=True, value=24)
+                        # gr.Slider(1, 100, step=1, label="Num frames", show_label=True, value=24)
+                        nframes = gr.Number(value=24, precision=0, minimum=0, step=1)
+                        fps = gr.Slider(1, 40, step=1, label="FPS", show_label=True, value=24)
 
                     make_anim = gr.Button("Animate", variant="primary")
 
@@ -213,15 +199,30 @@ with (gr.Blocks() as demo):
             return "", [[i] for i in sorted(anims)]
 
         @make_anim.click(inputs=[batch_size2, nframes, amplitude, min_cycles, max_cycles, fps], outputs=[anim_prev])
-        def mk_anim(batch_size2, nframes, amplitude, min_cycles, max_cycles, fps):
+        def mk_anim(batch_size2, nframes, amplitude, min_cycles, max_cycles, fps, progress=gr.Progress()):
             global tmp_anim
             if anim_item is None:
                 print("select item first silly")
                 return
 
+            ctr = 0
+            progress((0, nframes))
+            last_desc = ""
+
+            def ctr_callback(x=None):
+                nonlocal ctr, last_desc
+                if isinstance(x, str):
+                    last_desc = x
+                else:
+                    if x is None:
+                        ctr += 1
+                    else:
+                        ctr += x
+                progress((ctr, nframes), desc=last_desc)
+
             anim = Anim.sin_walk(anim_item, steps=nframes, amplitude=amplitude, min_cycles=min_cycles,
                                  max_cycles=max_cycles)
-            anim.save_images_and_make_gif(gan, batch_size=batch_size2, fps=fps)
+            anim.save_images_and_make_gif(gan, upsampler, session, batch_size=batch_size2, fps=fps, progress=ctr_callback)
             tmp_anim = anim
 
             return anim.gif_path
@@ -248,4 +249,4 @@ with (gr.Blocks() as demo):
             tmp_anim = None
             return [i.img_path for i in saved_items]
 
-demo.launch(share=False)
+demo.launch(share=True)

@@ -28,9 +28,11 @@ class RealESRGAN(Upscaler):
 
     def cpu(self):
         self.upsampler.model.cpu()
+        return self
 
     def to(self, device):
         self.upsampler.model.to(device)
+        return self
 
 
 def get_real_esrgan(name="RealESRGAN_x4plus.pth"):

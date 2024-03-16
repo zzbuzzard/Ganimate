@@ -16,9 +16,10 @@ from util import *
 
 
 class BigGAN(GAN):
-    def __init__(self):
+    def __init__(self, res):
         super().__init__("BigGAN",  8)
-        self.model = bg.BigGAN.from_pretrained('biggan-deep-256').to(device)
+        self.res = res
+        self.model = bg.BigGAN.from_pretrained(f"biggan-deep-{res}").to(device)
 
     # Applies BIGGAN but batched
     #  noises : N x latent
@@ -26,7 +27,7 @@ class BigGAN(GAN):
     @torch.no_grad()
     def batched_gen(self, noises, classes, trunc, batch_size=12):
         N = noises.shape[0]
-        output = torch.zeros((N, 3, 256, 256))
+        output = torch.zeros((N, 3, self.res, self.res))
 
         for i in range(0, N, batch_size):
             j = min(i + batch_size, N)
@@ -76,3 +77,10 @@ class BigGAN(GAN):
 
         return [trf.to_pil_image(i) for i in out.unbind(0)]
 
+    def cpu(self):
+        self.model.cpu()
+        return self
+
+    def to(self, device):
+        self.model.to(device)
+        return self

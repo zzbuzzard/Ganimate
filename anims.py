@@ -6,7 +6,7 @@ import shutil
 
 import util
 from gan import GAN
-
+from pipeline import generate_from_config
 
 def sinusoidal_walk(z, steps, seed=-1, min_cycles=1, max_cycles=3, move_class=False, amplitude=1):
     if not move_class:
@@ -61,13 +61,13 @@ class Anim:
         # else:
         #     self.zs = zs
 
-    def save_images_and_make_gif(self, gan, batch_size, fps=24):
+    def save_images_and_make_gif(self, gan, upscaler, rembg_session, batch_size, fps=24, progress=None):
         if os.path.exists(self.gif_path):
             print("Warning: making gif but it already exists")
-        imgs = gan.generate(self.zs, batch_size, **self.item_config)
+
+        imgs = generate_from_config(self.item_config, self.zs, gan, upscaler, rembg_session, batch_size, ctr_callback=progress)
 
         os.makedirs(self.dir, exist_ok=True)
-        # TODO: Delete old tmp images
         for i, img in enumerate(imgs):
             img.save(join(self.dir, f"{i:06d}.png"))
 
