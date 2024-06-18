@@ -44,6 +44,11 @@ def generate_from_config(config, zs, gan: GAN, upscaler: upscalers.Upscaler, rem
         imgs = bg_removed
         itered = True
 
+    if config["x_mirror"]:
+        imgs = [util.make_tileable_horizontal(im) for im in imgs]
+    if config["y_mirror"]:
+        imgs = [util.make_tileable_vertical(im) for im in imgs]
+
     if not itered:
         ctr_callback(count)
 

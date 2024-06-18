@@ -17,7 +17,7 @@ from util import *
 
 class BigGAN(GAN):
     def __init__(self, res):
-        super().__init__("BigGAN",  8)
+        super().__init__("BigGAN" + ("-512" if res==512 else ""),  8)
         self.res = res
         self.model = bg.BigGAN.from_pretrained(f"biggan-deep-{res}").to(device)
 

@@ -8,6 +8,7 @@ import util
 from gan import GAN
 from pipeline import generate_from_config
 
+
 def sinusoidal_walk(z, steps, seed=-1, min_cycles=1, max_cycles=3, move_class=False, amplitude=1):
     if not move_class:
         c = z[128:]
@@ -16,15 +17,18 @@ def sinusoidal_walk(z, steps, seed=-1, min_cycles=1, max_cycles=3, move_class=Fa
     if seed != -1:
         np.random.seed(seed)
 
-    n = z.shape[0]
+    sh = (len(z.shape)-1)*(1,) + (z.shape[-1],)
 
-    bias = np.random.uniform(0, 2 * math.pi, size=(n,)).astype(np.float32)
-    num_its = np.random.randint(min_cycles, max_cycles + 1, size=(n,))
+    bias = np.random.uniform(0, 2 * math.pi, size=sh).astype(np.float32)
+    num_its = np.random.randint(min_cycles, max_cycles + 1, size=sh)
 
-    t = np.linspace(0, 1, steps, endpoint=False, dtype=np.float32)
+    t = np.linspace(0, 1, steps, endpoint=False, dtype=np.float32).reshape((steps,) + (len(z.shape)*(1,)))
 
     # t x N
-    offsets = np.sin(t[:, None] * 2 * math.pi * num_its[None] + bias[None]) - np.sin(bias[None])
+    offsets = np.sin(t * 2 * math.pi * num_its[None] + bias[None]) - np.sin(bias[None])
+
+    # bias = 1 x (shape)
+    # t    = (t)
 
     # t x N
     zs = z[None] + offsets * amplitude

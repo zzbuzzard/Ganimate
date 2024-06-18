@@ -6,6 +6,7 @@ import os
 import gc
 
 from biggan import BigGAN
+from stylegan import StyleGAN
 from gan import GAN
 from upscalers import get_real_esrgan
 from remove_bg import get_remove_bg_model, remove_bg
@@ -14,7 +15,23 @@ import util
 from anims import Anim
 from pipeline import generate_from_config
 
-gan = BigGAN(256)
+
+def gan_from_name(name: str) -> GAN:
+    if name == "BigGAN":
+        return BigGAN(256)
+    elif name == "BigGAN-512":
+        return BigGAN(512)
+    elif name == "StyleGAN-ffhq":
+        return StyleGAN("ffhq")
+    elif name == "StyleGAN-cat":
+        return StyleGAN("cat")
+    elif name == "StyleGAN-human":
+        return StyleGAN("human")
+    else:
+        raise NotImplementedError(f"Unknown GAN: '{name}'")
+
+
+gan = gan_from_name("BigGAN")
 upsampler = get_real_esrgan().cpu()
 session = get_remove_bg_model()
 
@@ -36,18 +53,39 @@ with (gr.Blocks() as demo):
                 # Settings
                 with gr.Group():
                     with gr.Column(scale=1):
-                        with gr.Row():
-                            classes = gr.Textbox(label="Classes", show_label=True, info="(comma separated list)")
-                            trunc = gr.Slider(0, 1, label="Truncation", show_label=True, value=0.5)
+                        # Per-GAN stuff
+                        with gr.Tab("BigGAN") as biggantab:
+                            with gr.Row():
+                                bg_res = gr.Checkbox(value=False, label="512x512")
+                                # info="(comma separated list)"
+                                classes = gr.Textbox(label="Classes (comma sep)", show_label=True)
+                                cmul = gr.Slider(0, 10, step=0.1, label="c-mul", show_label=True, value=1.)
+                        with gr.Tab("StyleGAN") as stylegantab:
+                            with gr.Row():
+                                sg_mode = gr.Dropdown(choices=["ffhq", "cat", "human"], value="ffhq", show_label=False,
+                                                   interactive=True, allow_custom_value=False)
+                                wmul = gr.Slider(0, 10, step=0.1, label="w-mul", show_label=True, value=1.)
+                                wnoise = gr.Slider(0, 10, step=0.1, label="w-noise", show_label=True, value=0.)
                         with gr.Row():
                             zmul = gr.Slider(0, 10, step=0.1, label="z-mul", show_label=True, value=1.)
-                            cmul = gr.Slider(0, 10, step=0.1, label="c-mul", show_label=True, value=1.)
+                            trunc = gr.Slider(0, 1, label="Truncation", show_label=True, value=0.5)
                             use_upscale = gr.Checkbox(value=False, label="Upscale", info="RealESRGAN-4x")
                             use_bg_remove = gr.Checkbox(value=False, label="BG Remove")
                         with gr.Row():
                             batch_size = gr.Slider(1, 32, step=1, label="Batch size", show_label=True, value=4)
                             reps = gr.Slider(1, 32, step=1, label="Repeats", show_label=True, value=1)
+                        with gr.Row():
+                            use_xmirror = gr.Checkbox(value=False, label="X-Tile")
+                            use_ymirror = gr.Checkbox(value=False, label="Y-Tile")
+                            # TODO: more settingseee
+                        with gr.Row():
+                            tag = gr.Textbox(label="Tag?", show_label=True)
+
                         gen_btn = gr.Button("Generate", variant="primary")
+
+                        # TODO: dont forget to add new settings here!
+                        gen_settings = {classes, cmul, wmul, wnoise, zmul, trunc, use_upscale, use_bg_remove, batch_size, reps, use_xmirror, use_ymirror, tag}
+
 
                 saved_gallery = gr.Gallery([i.img_path for i in saved_items],
                                            interactive=False,
@@ -64,13 +102,70 @@ with (gr.Blocks() as demo):
                                          scale=1,
                                          label="Generations")
 
-        @gen_btn.click(inputs=[trunc, zmul, cmul, classes, batch_size, reps, use_upscale, use_bg_remove],
-                       outputs=gen_gallery)
-        def letsgo(trunc, zmul, cmul, classes, batch_size, reps, use_upscale, use_bg_remove, progress=gr.Progress()):
+        def config_from_settings(data):
+            # The config only really needs to contain stuff needed for animation; this is a bit excessive atm (eg wmul)
+            return {
+                "trunc": data[trunc],
+                "zmul": data[zmul],
+                "cmul": data[cmul],
+                "wmul": data[wmul],
+                "wnoise": data[wnoise],
+                "upscale": data[use_upscale],
+                "bg_remove": data[use_bg_remove],
+                "x_mirror": data[use_xmirror],
+                "y_mirror": data[use_ymirror],
+                "tag": data[tag],
+                "gan": gan.name,
+            }
+
+        def gen_kwargs_from_settings(data):
+            return {
+                "trunc": data[trunc],
+                "z_mul": data[zmul],
+                "class_mul": data[cmul],
+                "w_mul": data[wmul],
+                "wplus_noise": data[wnoise],
+                "classes": [i.strip() for i in data[classes].strip().split(",") if len(i) > 0]
+            }
+
+        SELECTED_MODEL = "BigGAN"
+        # Track current model
+        def set_bg_mode(is_512: bool):
+            global SELECTED_MODEL
+            SELECTED_MODEL = "BigGAN" + ("-512" if is_512 else "")
+            print("Selected", SELECTED_MODEL)
+        def set_sg_mode(mode: str):
+            global SELECTED_MODEL
+            SELECTED_MODEL = f"StyleGAN-{mode}"
+            print("Selected", SELECTED_MODEL)
+        biggantab.select(set_bg_mode, inputs=bg_res)
+        bg_res.input(set_bg_mode, inputs=bg_res)
+        stylegantab.select(set_sg_mode, inputs=sg_mode)
+        sg_mode.input(set_sg_mode, inputs=sg_mode)
+
+        # Updates the current GAN to that specified by SELECTED_MODEL
+        def update_gan(update_to=None):
+            global gan
+            goal = SELECTED_MODEL if update_to is None else update_to
+            if gan.name != goal:
+                print(f"Switching GAN: {gan.name} -> {goal}")
+                del gan
+                gc.collect()
+                torch.cuda.empty_cache()
+                gan = gan_from_name(goal)
+                assert gan.name == goal, f"{gan.name} != {goal} ?!"
+
+        @gen_btn.click(inputs=gen_settings, outputs=gen_gallery)
+        def letsgo(data, progress=gr.Progress()):
             global image_list, gen_idx, selected_idx
 
+            update_gan()
+
+            bs = data[batch_size]
+            rep = data[reps]
+
             ctr = 0
-            progress((0, reps * batch_size))
+            progress((0, rep * bs))
             last_desc = ""
 
             def ctr_callback(x=None):
@@ -82,31 +177,23 @@ with (gr.Blocks() as demo):
                         ctr += 1
                     else:
                         ctr += x
-                progress((ctr, reps * batch_size), desc=last_desc)
+                progress((ctr, rep * bs), desc=last_desc)
 
             selected_idx = None
 
-            config = {
-                "trunc": trunc,
-                "zmul": zmul,
-                "cmul": cmul,
-                "upscale": use_upscale,
-                "bg_remove": use_bg_remove,
-                "gan": "BigGAN"
-            }
+            config = config_from_settings(data)
 
-            batch_size = int(batch_size)
-            reps = int(reps)
+            bs = int(bs)
+            rep = int(rep)
+            kwargs = gen_kwargs_from_settings(data)
 
-            for _ in progress.tqdm(range(reps)):
-                progress((ctr, reps * batch_size), desc="GAN running")
+            for _ in progress.tqdm(range(rep)):
+                progress((ctr, rep * bs), desc="GAN running")
 
-                zs = gan.get_z(batch_size, classes=[i for i in classes.split(",") if len(i) > 0], z_mul=zmul,
-                               class_mul=cmul, trunc=trunc)
+                zs = gan.get_z(bs, **kwargs)
+                imgs = generate_from_config(config, zs, gan, upsampler, session, bs, ctr_callback)
 
-                imgs = generate_from_config(config, zs, gan, upsampler, session, batch_size, ctr_callback)
-
-                for i in range(batch_size):
+                for i in range(bs):
                     uitem = UnsavedItem(gen_idx, zs[i], imgs[i], config)
                     unsaved_items.insert(0, uitem)
                     gen_idx += 1
@@ -219,6 +306,9 @@ with (gr.Blocks() as demo):
                     else:
                         ctr += x
                 progress((ctr, nframes), desc=last_desc)
+
+            need_gan = anim_item.config["gan"]
+            update_gan(need_gan)
 
             anim = Anim.sin_walk(anim_item, steps=nframes, amplitude=amplitude, min_cycles=min_cycles,
                                  max_cycles=max_cycles)
