@@ -3,10 +3,14 @@ import numpy as np
 from typing import List, Tuple
 from PIL import Image
 
+import util
+
 
 class GAN(ABC):
     def __init__(self, name: str, default_batch_size: int):
         self.name = name
+        if util.get_tile_mode() and not self.name.endswith("_t"):
+            self.name = self.name + "_t"
         self.default_batch_size = default_batch_size
 
     @abstractmethod

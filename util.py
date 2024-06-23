@@ -14,6 +14,22 @@ if not os.path.exists(path_unsaved):
     os.mkdir(path_unsaved)
 
 
+_orig = torch.nn.Conv2d.__init__
+def set_tile_mode(tiles=False):
+    if tiles == get_tile_mode():
+        return
+    if tiles:
+        def __init__(self, *args, **kwargs):
+            return _orig(self, *args, **kwargs, padding_mode='circular')
+        torch.nn.Conv2d.__init__ = __init__
+        print("Tiled generation ENABLED!")
+    else:
+        torch.nn.Conv2d.__init__ = _orig
+        print("Tiled generation DISABLED!")
+
+def get_tile_mode():
+    return torch.nn.Conv2d.__init__ != _orig
+
 # Path w files in format 000000.png 000001.png ...
 def make_video(path, fps, gif=False, out_path=None):
     if out_path is None:

@@ -16,7 +16,15 @@ from anims import Anim
 from pipeline import generate_from_config
 
 
-def gan_from_name(name: str) -> GAN:
+def gan_from_name(_name: str) -> GAN:
+    if _name.endswith("_t"):
+        util.set_tile_mode(True)
+        name = _name
+        while name.endswith("_t"):
+            name = name[:-2]
+    else:
+        util.set_tile_mode(False)
+        name = _name
     if name == "BigGAN":
         return BigGAN(256)
     elif name == "BigGAN-512":
@@ -28,7 +36,7 @@ def gan_from_name(name: str) -> GAN:
     elif name == "StyleGAN-human":
         return StyleGAN("human")
     else:
-        raise NotImplementedError(f"Unknown GAN: '{name}'")
+        raise NotImplementedError(f"Unknown GAN: '{_name}'")
 
 
 gan = gan_from_name("BigGAN")
@@ -75,8 +83,10 @@ with (gr.Blocks() as demo):
                             batch_size = gr.Slider(1, 32, step=1, label="Batch size", show_label=True, value=4)
                             reps = gr.Slider(1, 32, step=1, label="Repeats", show_label=True, value=1)
                         with gr.Row():
-                            use_xmirror = gr.Checkbox(value=False, label="X-Tile")
-                            use_ymirror = gr.Checkbox(value=False, label="Y-Tile")
+                            use_tile = gr.Checkbox(value=False, label="TILE")
+                            use_xmirror = gr.Checkbox(value=False, label="X-Tile (mirror)")
+                            use_ymirror = gr.Checkbox(value=False, label="Y-Tile (mirror)")
+
                             # TODO: more settingseee
                         with gr.Row():
                             tag = gr.Textbox(label="Tag?", show_label=True)
@@ -84,8 +94,7 @@ with (gr.Blocks() as demo):
                         gen_btn = gr.Button("Generate", variant="primary")
 
                         # TODO: dont forget to add new settings here!
-                        gen_settings = {classes, cmul, wmul, wnoise, zmul, trunc, use_upscale, use_bg_remove, batch_size, reps, use_xmirror, use_ymirror, tag}
-
+                        gen_settings = {classes, cmul, wmul, wnoise, zmul, trunc, use_upscale, use_bg_remove, batch_size, reps, use_xmirror, use_ymirror, tag, use_tile}
 
                 saved_gallery = gr.Gallery([i.img_path for i in saved_items],
                                            interactive=False,
@@ -102,6 +111,10 @@ with (gr.Blocks() as demo):
                                          scale=1,
                                          label="Generations")
 
+
+        @save_btn.click(outputs=saved_gallery)
+
+
         def config_from_settings(data):
             # The config only really needs to contain stuff needed for animation; this is a bit excessive atm (eg wmul)
             return {
@@ -115,7 +128,7 @@ with (gr.Blocks() as demo):
                 "x_mirror": data[use_xmirror],
                 "y_mirror": data[use_ymirror],
                 "tag": data[tag],
-                "gan": gan.name,
+                "gan": gan.name + ("_t" if data[use_tile] else ""),
             }
 
         def gen_kwargs_from_settings(data):
@@ -138,10 +151,21 @@ with (gr.Blocks() as demo):
             global SELECTED_MODEL
             SELECTED_MODEL = f"StyleGAN-{mode}"
             print("Selected", SELECTED_MODEL)
+        def set_tile_mode(tile: bool):
+            global SELECTED_MODEL
+            if SELECTED_MODEL[-2:] == "_t":
+                if tile:
+                    return
+                SELECTED_MODEL = SELECTED_MODEL[:-2]
+            else:
+                if not tile:
+                    return
+                SELECTED_MODEL = SELECTED_MODEL + "_t"
         biggantab.select(set_bg_mode, inputs=bg_res)
         bg_res.input(set_bg_mode, inputs=bg_res)
         stylegantab.select(set_sg_mode, inputs=sg_mode)
         sg_mode.input(set_sg_mode, inputs=sg_mode)
+        use_tile.input(set_tile_mode, inputs=use_tile)
 
         # Updates the current GAN to that specified by SELECTED_MODEL
         def update_gan(update_to=None):
@@ -153,6 +177,10 @@ with (gr.Blocks() as demo):
                 gc.collect()
                 torch.cuda.empty_cache()
                 gan = gan_from_name(goal)
+                if goal.endswith("_t_t"):
+                    goal = goal[:-2]
+                if gan.name.endswith("_t_t"):
+                    gan.name=gan.name[:-2]
                 assert gan.name == goal, f"{gan.name} != {goal} ?!"
 
         @gen_btn.click(inputs=gen_settings, outputs=gen_gallery)
