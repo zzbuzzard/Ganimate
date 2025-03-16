@@ -26,7 +26,7 @@ class BigGAN(GAN):
     @torch.no_grad()
     def batched_gen(self, noises, classes, trunc, batch_size=12, progress=None):
         N = noises.shape[0]
-        output = torch.zeros((N, 3, self.res, self.res))
+        output = torch.zeros((N, 3, self.res[0], self.res[1]))
 
         for i in range(0, N, batch_size):
             j = min(i + batch_size, N)
