@@ -21,7 +21,10 @@ BigGAN:
 </p>
 
 ## Installation
-First, you will need `ffmpeg` (and `ffprobe`, which comes with it normally) installed and on path.
+You will need a CUDA-enabled GPU to use this app, with at least 2GB RAM for BigGAN,
+and possibly 4GB or 6GB for StyleGAN.
+
+First, if you don't have `ffmpeg`, set it up and make sure the executables are accessible on PATH.
 
 Clone the repo, including the submodules:
 ```
@@ -42,7 +45,7 @@ and to run `"C:\Program Files (x86)\Microsoft Visual Studio\<VERSION>\Community\
 as well as put the MSVC compiler on your PATH (if it isn't already).
 This is because they use CUDA extensions, it's a bit of a pain.
 They have some Python reqs which I've included in my requirements.txt.
-See the StyleGAN3 README for details, and if you have StyleGAN related issues.
+See the StyleGAN3 README for details if you have StyleGAN related issues.
 
 Finally, install my requirements
 ```
@@ -107,10 +110,14 @@ Several latents are generated, and a loop formed between them, leading to a nice
 seamless animation like this one:
 
 <p align="left">
-    <img src="assets/ffhq_compressed.gif" width="100" />
+    <img src="assets/ffhq_compressed.gif" width="200" />
 </p>
 To save an animation, give it a name and click 'Save anim'.
 The animations are saved in `anims/[name].mp4`
+
+
+The generation settings are shared between this tab and GenObj.
+
 
 </details>
 
