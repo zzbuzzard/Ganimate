@@ -8,48 +8,38 @@ import remove_bg
 import util
 
 
-def generate_from_config(config, zs, gan: GAN, upscaler: upscalers.Upscaler, remove_bg_session, batch_size, ctr_callback=None):
-    if ctr_callback is None:
-        ctr_callback = lambda *args, **kwargs: None
-
-    ctr_callback("GAN")
-    imgs = gan.generate(zs, batch_size, **config)
+def generate_from_config(config, zs, gan: GAN, upscaler: upscalers.Upscaler, remove_bg_session, batch_size, progress=None,
+                         writer=None):
+    imgs = gan.generate(zs, batch_size, progress, **config, writer=writer)
     count = len(imgs)
-
-    itered = False
 
     if config["upscale"]:
         upscaler.to(util.device)
-        ctr_callback("Upscaling")
+
+        progress((0, count), desc="Upscaling")
 
         upsampled = []
         for i in range(count):
             x = upscaler.enhance(np.array(imgs[i]))
             upsampled.append(Image.fromarray(x))
-            ctr_callback()
+
+            progress((i+1, count), desc="Upscaling")
 
         imgs = upsampled
         upscaler.cpu()
 
-        itered = True
-
     if config["bg_remove"]:
         gc.collect()
-        ctr_callback("Removing BG")
+        progress((0, count), desc="Removing BG")
         bg_removed = []
         for i in range(count):
             bg_removed.append(remove_bg.remove_bg(remove_bg_session, imgs[i]))
-            if not itered:
-                ctr_callback()
+            progress((i+1, count), desc="Removing BG")
         imgs = bg_removed
-        itered = True
 
     if config["x_mirror"]:
         imgs = [util.make_tileable_horizontal(im) for im in imgs]
     if config["y_mirror"]:
         imgs = [util.make_tileable_vertical(im) for im in imgs]
-
-    if not itered:
-        ctr_callback(count)
 
     return imgs

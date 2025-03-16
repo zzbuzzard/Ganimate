@@ -17,15 +17,14 @@ from util import *
 
 class BigGAN(GAN):
     def __init__(self, res):
-        super().__init__("BigGAN" + ("-512" if res==512 else ""),  8)
-        self.res = res
+        super().__init__("BigGAN" + ("-512" if res == 512 else ""),  8, (res, res))
         self.model = bg.BigGAN.from_pretrained(f"biggan-deep-{res}").to(device)
 
     # Applies BIGGAN but batched
     #  noises : N x latent
     #  classes : N x class
     @torch.no_grad()
-    def batched_gen(self, noises, classes, trunc, batch_size=12):
+    def batched_gen(self, noises, classes, trunc, batch_size=12, progress=None):
         N = noises.shape[0]
         output = torch.zeros((N, 3, self.res, self.res))
 
@@ -38,6 +37,9 @@ class BigGAN(GAN):
                 out = self.model(n, c, trunc)
 
                 output[i:j] = out
+
+            if progress is not None:
+                progress((j, N), desc="Generating images...")
 
         return output
 
@@ -65,12 +67,12 @@ class BigGAN(GAN):
         return out.numpy()
 
     @torch.no_grad()
-    def generate(self, zs, batch_size, trunc=0.5, unclip=True, **kwargs) -> List[Image.Image]:
+    def generate(self, zs, batch_size, progress=None, trunc=0.5, unclip=True, **kwargs) -> List[Image.Image]:
         assert zs.shape[1] == 1128, f"Invalid shape {zs.shape}"
         zs = torch.from_numpy(zs).to(device)
         z = zs[:, :128]
         c = zs[:, 128:]
-        out = self.batched_gen(z, c, trunc, batch_size=batch_size)
+        out = self.batched_gen(z, c, trunc, batch_size=batch_size, progress=progress)
 
         if unclip:
             out = torch.clip(out * .5 + .5, 0, 1)

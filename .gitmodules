@@ -1,0 +1,6 @@
+[submodule "Real-ESRGAN"]
+	path = Real-ESRGAN
+	url = https://github.com/xinntao/Real-ESRGAN.git
+[submodule "stylegan3"]
+	path = stylegan3
+	url = https://github.com/NVlabs/stylegan3

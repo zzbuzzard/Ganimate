@@ -3,6 +3,8 @@ import math
 from os.path import join
 import os
 import shutil
+from scipy.ndimage import gaussian_filter1d
+import torch
 
 import util
 from gan import GAN
@@ -40,12 +42,47 @@ def sinusoidal_walk(z, steps, seed=-1, min_cycles=1, max_cycles=3, move_class=Fa
     return zs.astype(np.float32)
 
 
+def interpolate(zs: np.ndarray, mean, std, frames_between: int, normalise: bool = False, gaussian_smooth: bool = True,
+                gaussian_sigma: float = 2):
+    # x, y ~ N(m, s^2)
+
+    # (1-p)x ~ N((1-p)m, (1-p)^2 s^2)
+    # py ~ N(pm, p^2 s^2)
+    # (1-p)x + py ~ N((1-p)m + pm = m, [(1-p)^2 + p^2] s^2)
+
+    # so normalise `(1-p)x + py` => subtract m, divide by ((1-p)^2+p^2)^0.5, and add m
+
+    all_zs = []
+
+    n = zs.shape[0]
+    for i in range(n):
+        start = zs[i][None]  # 1 x D
+        end = zs[(i + 1) % n][None]  # 1 x D
+        ps = np.linspace(0, 1, frames_between, endpoint=False, dtype=np.float32)[:, None]  # N x 1
+        norm_factor = ((1 - ps) ** 2 + ps ** 2) ** 0.5
+        lerped = start + ps * (end - start)  # N x D
+
+        if normalise:
+            normed = (lerped - mean) / norm_factor + mean
+        else:
+            normed = lerped
+
+        all_zs.append(normed)
+
+    all_zs = np.concatenate(all_zs, axis=0)
+
+    if gaussian_smooth:
+        all_zs = gaussian_filter1d(all_zs, sigma=gaussian_sigma, axis=0, mode='wrap')
+
+    return all_zs
+
+
 class Anim:
     """
     itemroot/
      anim_name/
       images
-     anim_name.gif / .npy
+     anim_name.gif / .mp4
     """
 
     # if zs is None, loads
@@ -55,6 +92,7 @@ class Anim:
         self.name = name
 
         self.gif_path = join(item_root, name + ".gif")
+        self.mp4_path = join(item_root, name + ".mp4")
         self.dir = join(item_root, name)
         # self.np_path = join(item_root, name + ".npy")
 
@@ -69,29 +107,32 @@ class Anim:
         if os.path.exists(self.gif_path):
             print("Warning: making gif but it already exists")
 
-        imgs = generate_from_config(self.item_config, self.zs, gan, upscaler, rembg_session, batch_size, ctr_callback=progress)
+        imgs = generate_from_config(self.item_config, self.zs, gan, upscaler, rembg_session, batch_size, progress=progress)
 
-        os.makedirs(self.dir, exist_ok=True)
-        for i, img in enumerate(imgs):
-            img.save(join(self.dir, f"{i:06d}.png"))
+        util.make_video_av(imgs, self.mp4_path, fps)
 
-        util.make_video(self.dir, fps, gif=True, out_path=self.gif_path)
+        # os.makedirs(self.dir, exist_ok=True)
+        # for i, img in enumerate(imgs):
+        #     img.save(join(self.dir, f"{i:06d}.png"))
+        #
+        # util.make_video(self.dir, fps, gif=True, out_path=self.gif_path)
+        # util.make_video(self.dir, fps, gif=False, out_path=self.mp4_path)
 
     def save_with_name(self, name):
         item_root = self.item_root
 
         new_gif_path = join(item_root, name + ".gif")
-        # new_np_path = join(item_root, name + ".npy")
+        new_mp4_path = join(item_root, name + ".mp4")
         new_dir = join(item_root, name)
 
         shutil.move(self.gif_path, new_gif_path)
+        shutil.move(self.mp4_path, new_mp4_path)
         shutil.move(self.dir, new_dir)
-        # shutil.move(self.np_path, new_np_path)
 
         self.name = name
         self.gif_path = new_gif_path
+        self.mp4_path = new_mp4_path
         self.dir = new_dir
-        # self.np_path = new_np_path
 
     @staticmethod
     def sin_walk(item, steps, **kwargs):
@@ -99,6 +140,8 @@ class Anim:
             shutil.rmtree(join(item.root, "tmp"))
         if os.path.isfile(join(item.root, "tmp.gif")):
             os.remove(join(item.root, "tmp.gif"))
+        if os.path.isfile(join(item.root, "tmp.mp4")):
+            os.remove(join(item.root, "tmp.mp4"))
 
         zs = sinusoidal_walk(item.z, steps, **kwargs)
         return Anim(item.root, item.config, "tmp", zs=zs)

@@ -1,10 +1,14 @@
+import shutil
+
 import gradio as gr
 import torch
 from PIL import Image
 import numpy as np
 import os
 import gc
+from os.path import join
 
+import stylegan
 from biggan import BigGAN
 from stylegan import StyleGAN
 from gan import GAN
@@ -12,7 +16,7 @@ from upscalers import get_real_esrgan
 from remove_bg import get_remove_bg_model, remove_bg
 from item import UnsavedItem, Item
 import util
-from anims import Anim
+from anims import Anim, interpolate
 from pipeline import generate_from_config
 
 
@@ -29,12 +33,8 @@ def gan_from_name(_name: str) -> GAN:
         return BigGAN(256)
     elif name == "BigGAN-512":
         return BigGAN(512)
-    elif name == "StyleGAN-ffhq":
-        return StyleGAN("ffhq")
-    elif name == "StyleGAN-cat":
-        return StyleGAN("cat")
-    elif name == "StyleGAN-human":
-        return StyleGAN("human")
+    elif name.startswith("stylegan"):
+        return StyleGAN(name)
     else:
         raise NotImplementedError(f"Unknown GAN: '{_name}'")
 
@@ -50,7 +50,8 @@ gen_idx = util.get_next_unsaved_idx()
 selected_idx = None
 
 with (gr.Blocks() as demo):
-    with gr.Tab("Gen") as gentab:
+    # Generate tab
+    with gr.Tab("GenObj") as gentab:
         gr.Markdown("""
         # G e n e r a t e
         """)
@@ -70,8 +71,8 @@ with (gr.Blocks() as demo):
                                 cmul = gr.Slider(0, 10, step=0.1, label="c-mul", show_label=True, value=1.)
                         with gr.Tab("StyleGAN") as stylegantab:
                             with gr.Row():
-                                sg_mode = gr.Dropdown(choices=["ffhq", "cat", "human"], value="ffhq", show_label=False,
-                                                   interactive=True, allow_custom_value=False)
+                                sg_mode = gr.Dropdown(choices=list(stylegan.all_models), value="stylegan3-t-ffhq-1024x1024",
+                                                      show_label=False, interactive=True, allow_custom_value=False)
                                 wmul = gr.Slider(0, 10, step=0.1, label="w-mul", show_label=True, value=1.)
                                 wnoise = gr.Slider(0, 10, step=0.1, label="w-noise", show_label=True, value=0.)
                         with gr.Row():
@@ -112,9 +113,6 @@ with (gr.Blocks() as demo):
                                          label="Generations")
 
 
-        @save_btn.click(outputs=saved_gallery)
-
-
         def config_from_settings(data):
             # The config only really needs to contain stuff needed for animation; this is a bit excessive atm (eg wmul)
             return {
@@ -149,7 +147,7 @@ with (gr.Blocks() as demo):
             print("Selected", SELECTED_MODEL)
         def set_sg_mode(mode: str):
             global SELECTED_MODEL
-            SELECTED_MODEL = f"StyleGAN-{mode}"
+            SELECTED_MODEL = mode
             print("Selected", SELECTED_MODEL)
         def set_tile_mode(tile: bool):
             global SELECTED_MODEL
@@ -168,10 +166,12 @@ with (gr.Blocks() as demo):
         use_tile.input(set_tile_mode, inputs=use_tile)
 
         # Updates the current GAN to that specified by SELECTED_MODEL
-        def update_gan(update_to=None):
+        def update_gan(update_to=None, progress=None):
             global gan
             goal = SELECTED_MODEL if update_to is None else update_to
             if gan.name != goal:
+                if progress is not None:
+                    progress(None, desc=f"Loading GAN: {goal}")
                 print(f"Switching GAN: {gan.name} -> {goal}")
                 del gan
                 gc.collect()
@@ -187,25 +187,12 @@ with (gr.Blocks() as demo):
         def letsgo(data, progress=gr.Progress()):
             global image_list, gen_idx, selected_idx
 
-            update_gan()
+            update_gan(progress=progress)
 
             bs = data[batch_size]
             rep = data[reps]
 
-            ctr = 0
-            progress((0, rep * bs))
-            last_desc = ""
-
-            def ctr_callback(x=None):
-                nonlocal ctr, last_desc
-                if isinstance(x, str):
-                    last_desc = x
-                else:
-                    if x is None:
-                        ctr += 1
-                    else:
-                        ctr += x
-                progress((ctr, rep * bs), desc=last_desc)
+            progress(None, desc="Loaded!")
 
             selected_idx = None
 
@@ -213,18 +200,17 @@ with (gr.Blocks() as demo):
 
             bs = int(bs)
             rep = int(rep)
+            num_img = bs * rep
+
             kwargs = gen_kwargs_from_settings(data)
 
-            for _ in progress.tqdm(range(rep)):
-                progress((ctr, rep * bs), desc="GAN running")
+            zs = gan.get_z(num_img, **kwargs)
+            imgs = generate_from_config(config, zs, gan, upsampler, session, bs, progress)
 
-                zs = gan.get_z(bs, **kwargs)
-                imgs = generate_from_config(config, zs, gan, upsampler, session, bs, ctr_callback)
-
-                for i in range(bs):
-                    uitem = UnsavedItem(gen_idx, zs[i], imgs[i], config)
-                    unsaved_items.insert(0, uitem)
-                    gen_idx += 1
+            for i in range(num_img):
+                uitem = UnsavedItem(gen_idx, zs[i], imgs[i], config)
+                unsaved_items.insert(0, uitem)
+                gen_idx += 1
 
             return [i.img_path for i in unsaved_items]
 
@@ -245,17 +231,19 @@ with (gr.Blocks() as demo):
             selected_idx = None
             return [i.img_path for i in saved_items]
 
-    with gr.Tab("Anim") as animtab:
+    # Animate tab
+    with gr.Tab("AnimObj") as animtab:
         gr.Markdown("""
         # A n i m a t e
+        Animate the saved objects generated in GenObj. This works by just perturbing the latent slightly.
         """)
 
         anims = {}
         anim_item = None
 
         with gr.Row():
-            with gr.Column():
-                anim_prev = gr.Image(interactive=False)
+            anim_prev = gr.Image(interactive=False)
+            anim_vid = gr.Video(interactive=False, autoplay=True, loop=True)
 
             # Settings
             with gr.Column():
@@ -265,7 +253,7 @@ with (gr.Blocks() as demo):
                         max_cycles = gr.Slider(1, 20, step=1, label="Max cycles", show_label=True, value=3)
 
                     with gr.Row():
-                        amplitude = gr.Slider(0, 1, label="amt", value=0.1)
+                        amplitude = gr.Number(0.1, label="amplitude", minimum=0, step=0.1)
                         batch_size2 = gr.Slider(1, 32, step=1, label="Batch size", show_label=True, value=4)
 
                     with gr.Row():
@@ -280,7 +268,8 @@ with (gr.Blocks() as demo):
                     save_anim = gr.Button("Save anim", variant='primary')
 
             # Loadable animations
-            anim_name_list = gr.Dataset(components=["Textbox"], samples=[], type="values", label="Anims")
+            # textbox = gr.Textbox(interactive=False)
+            anim_name_list = gr.Dataset(components=[anim_name], samples=[["test"], ["test2"]], type="values", label="Anims")
 
         saved_gallery2 = gr.Gallery([i.img_path for i in saved_items],
                                     interactive=False,
@@ -311,41 +300,33 @@ with (gr.Blocks() as demo):
             anims[tmp_anim.name] = tmp_anim
 
             tmp_anim = None
-            return "", [[i] for i in sorted(anims)]
+            return "", gr.Dataset(samples=[[i] for i in sorted(anims)])
 
-        @make_anim.click(inputs=[batch_size2, nframes, amplitude, min_cycles, max_cycles, fps], outputs=[anim_prev])
+        def checkpath(path: str):
+            if not os.path.isfile(path):
+                return None
+            return path
+
+        @make_anim.click(inputs=[batch_size2, nframes, amplitude, min_cycles, max_cycles, fps], outputs=[anim_prev, anim_vid])
         def mk_anim(batch_size2, nframes, amplitude, min_cycles, max_cycles, fps, progress=gr.Progress()):
             global tmp_anim
             if anim_item is None:
                 print("select item first silly")
                 return
 
-            ctr = 0
-            progress((0, nframes))
-            last_desc = ""
-
-            def ctr_callback(x=None):
-                nonlocal ctr, last_desc
-                if isinstance(x, str):
-                    last_desc = x
-                else:
-                    if x is None:
-                        ctr += 1
-                    else:
-                        ctr += x
-                progress((ctr, nframes), desc=last_desc)
-
             need_gan = anim_item.config["gan"]
-            update_gan(need_gan)
+            update_gan(need_gan, progress=progress)
 
             anim = Anim.sin_walk(anim_item, steps=nframes, amplitude=amplitude, min_cycles=min_cycles,
                                  max_cycles=max_cycles)
-            anim.save_images_and_make_gif(gan, upsampler, session, batch_size=batch_size2, fps=fps, progress=ctr_callback)
+            anim.save_images_and_make_gif(gan, upsampler, session, batch_size=batch_size2, fps=fps, progress=progress)
             tmp_anim = anim
 
-            return anim.gif_path
+            img_path = anim_item.img_path if checkpath(anim.gif_path) is None else checkpath(anim.gif_path)
 
-        @saved_gallery2.select(outputs=[anim_prev, anim_name_list])
+            return img_path, checkpath(anim.mp4_path)
+
+        @saved_gallery2.select(outputs=[anim_prev, anim_vid, anim_name_list])
         def select_item_to_animate(data: gr.SelectData):
             global anims, anim_item, tmp_anim
             tmp_anim = None
@@ -353,13 +334,16 @@ with (gr.Blocks() as demo):
             names = util.get_anim_names(anim_item.idx)
             anims = {name: Anim(anim_item.root, anim_item.config, name) for name in names}
 
-            return anim_item.img_path, [[i] for i in sorted(anims)]
+            return anim_item.img_path, None, gr.Dataset(samples=[[i] for i in sorted(anims)])
 
-        @anim_name_list.select(outputs=[anim_prev])
+        @anim_name_list.select(outputs=[anim_prev, anim_vid])
         def select_anim_name(data: gr.SelectData):
             name = data.value[0]
             anim = anims[name]
-            return anim.gif_path
+
+            img_path = anim_item.img_path if checkpath(anim.gif_path) is None else checkpath(anim.gif_path)
+
+            return img_path, checkpath(anim.mp4_path)
 
         @animtab.select(outputs=saved_gallery2)
         def refresh(data: gr.SelectData):
@@ -367,4 +351,124 @@ with (gr.Blocks() as demo):
             tmp_anim = None
             return [i.img_path for i in saved_items]
 
-demo.launch(share=True)
+    # Animate tab
+    with gr.Tab("Anim") as longanimtab:
+        gr.Markdown("""
+        # Animation Station
+        Samples points in latent space and lerps between them to create a looping animation.
+        Uses the generation settings currently set in the main tab.
+        """)
+
+        longanim_root = "anims"
+        longanims = []
+        current_longanim = None
+
+        with gr.Row():
+            long_vid = gr.Video(interactive=False, autoplay=True, loop=True)
+
+            # Settings for long vid - would be nice to have alternative setups too
+            with gr.Column():
+                with gr.Group():
+                    with gr.Row():
+                        la_num_images = gr.Number(4, step=1, label="Num samples", show_label=True)
+                        frames_between_images = gr.Number(20, step=1, label="Frames between images", show_label=True)
+
+                    with gr.Row():
+                        la_batch_size = gr.Slider(1, 32, step=1, label="Batch size", show_label=True, value=4)
+                        la_fps = gr.Number(20, step=1, label="FPS", show_label=True)
+                        la_normalise = gr.Checkbox(value=True, label="Normalise", info="Whether to normalise intermediate latents to be the same size as the samples. Only uncheck if using StyleGAN with low W multiplier (e.g. 1)")
+
+                    with gr.Row():
+                        la_smooth = gr.Checkbox(value=True, label="Smooth path")
+                        la_smooth_factor = gr.Number(2, step=0.1, label="Smooth factor", show_label=True, minimum=0)
+
+                    make_long_anim = gr.Button("Animate", variant="primary")
+
+                with gr.Group():
+                    la_anim_name = gr.Textbox(value="Name", interactive=True)
+                    la_save_anim = gr.Button("Save anim", variant='primary')
+
+        # Loadable animations
+        # textbox2 = gr.Textbox(interactive=False)
+        la_anim_name_list = gr.Dataset(components=[la_anim_name], samples=[], type="values", label="Anims")
+
+        @la_save_anim.click(inputs=[la_anim_name], outputs=[la_anim_name, la_anim_name_list])
+        def change_anim_name(anim_name):
+            global current_longanim, longanims
+
+            if current_longanim is None:
+                print("no anim to save")
+
+            if os.path.exists(os.path.join(longanim_root, anim_name + ".mp4")):
+                print("But that anim already exists")
+                return
+
+            shutil.move(join(longanim_root, current_longanim + ".mp4"), join(longanim_root, anim_name + ".mp4"))
+            longanims.remove(current_longanim)
+            longanims.append(anim_name)
+            longanims = sorted(set(longanims))
+
+            current_longanim = anim_name
+
+            return current_longanim, gr.Dataset(samples=[[i] for i in longanims])
+
+        @make_long_anim.click(inputs=gen_settings | {la_num_images, frames_between_images, la_batch_size, la_fps, la_normalise, la_smooth, la_smooth_factor}, outputs=[long_vid, la_anim_name, la_anim_name_list])
+        def mk_longanim(data, progress=gr.Progress()):
+            global current_longanim, longanims
+            current_longanim = "tmp"
+
+            num_images = data.pop(la_num_images)
+            frames = data.pop(frames_between_images)
+            batch_size = data.pop(la_batch_size)
+            fps = data.pop(la_fps)
+            normalise = data.pop(la_normalise)
+            smooth = data.pop(la_smooth)
+            smooth_factor = data.pop(la_smooth_factor)
+
+            update_gan(progress=progress)
+            config = config_from_settings(data)
+            kwargs = gen_kwargs_from_settings(data)
+
+            # normalise = "stylegan" not in gan.name
+
+            zs = gan.get_z(num_images, **kwargs)
+            if len(zs.shape) == 3:
+                out = []
+                k = zs.shape[1]
+                for i in range(k):
+                    p = interpolate(zs[:, i], gan.mean_latent, gan.std_latent, frames, normalise=normalise,
+                                    gaussian_smooth=smooth, gaussian_sigma=smooth_factor)
+                    out.append(p)
+                zs = np.stack(out, axis=1)
+            else:
+                zs = interpolate(zs, gan.mean_latent, gan.std_latent, frames, normalise=normalise,
+                                 gaussian_smooth=smooth, gaussian_sigma=smooth_factor)
+
+            imgs = generate_from_config(config, zs, gan, upsampler, session, batch_size, progress)
+
+            write_path = join(longanim_root, current_longanim + ".mp4")
+
+            writer = util.AvVideoWriter(imgs[0].height, imgs[0].width, write_path, fps)
+            for img in imgs:
+                writer.write(img)
+            writer.close()
+
+            longanims.append(current_longanim)
+            longanims = sorted(set(longanims))
+
+            return write_path, current_longanim, gr.Dataset(samples=[[i] for i in longanims])
+
+        @la_anim_name_list.select(outputs=[long_vid, la_anim_name])
+        def select_anim_name(data: gr.SelectData):
+            global current_longanim
+            name = data.value[0]
+            current_longanim = name
+            return join(longanim_root, name + ".mp4"), name
+
+        @longanimtab.select(outputs=la_anim_name_list)
+        def refresh(data: gr.SelectData):
+            global longanims
+            longanims = sorted([i[:-4] for i in os.listdir(longanim_root) if i.endswith(".mp4")])
+            return gr.Dataset(samples=[[i] for i in longanims])
+
+demo.launch(share=False)

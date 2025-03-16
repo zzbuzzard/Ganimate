@@ -3,6 +3,9 @@ import numpy as np
 import os
 from os.path import join
 from PIL import Image
+from typing import List
+import av
+import torchvision.transforms.functional as trf
 
 path_saved = "items"
 path_unsaved = "gens"
@@ -41,6 +44,44 @@ def make_video(path, fps, gif=False, out_path=None):
         os.system(f"ffmpeg -r {fps} -i {path}/%06d.png -vcodec libx264 -y {out_path} -qp 0")
 
 
+# Uses PyAV and writes as MP4
+class AvVideoWriter:
+    def __init__(self, height, width, out_path, fps, crf=20):
+        self.file = open(out_path, "wb")
+        self.output = av.open(self.file, 'w', format="mp4")
+        self.stream = self.output.add_stream('h264', str(fps))
+        self.stream.width = width
+        self.stream.height = height
+        self.stream.pix_fmt = 'yuv444p'
+        self.stream.options = {'crf': str(crf)}  # higher value = more compression
+
+    def write(self, img):
+        if isinstance(img, Image.Image):
+            arr = np.array(img)
+        elif isinstance(img, np.ndarray):
+            arr = img
+        elif isinstance(img, torch.Tensor):
+            arr = np.array(trf.to_pil_image(img))
+
+        frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
+        packet = self.stream.encode(frame)
+        self.output.mux(packet)
+
+    def close(self):
+        packet = self.stream.encode(None)
+        self.output.mux(packet)
+        self.output.close()
+        self.file.close()
+
+
+def make_video_av(images: List[Image.Image], out_path, fps, crf=20):
+    writer = AvVideoWriter(images[0].height, images[0].width, out_path, fps, crf=crf)
+    for img in images:
+        writer.write(img)
+    writer.close()
+
+
+
 def get_next_unsaved_idx():
     ds = os.listdir(path_unsaved)
     n = 0
@@ -74,7 +115,10 @@ def get_saved_item_ids():
 
 def get_anim_names(item_idx):
     root = os.path.join(path_saved, str(item_idx))
-    return [i for i in os.listdir(root) if os.path.isdir(join(root, i))]
+    print(os.listdir(root))
+    out = sorted(set([i.split(".")[0] for i in os.listdir(root) if i.endswith(".gif") or i.endswith(".mp4")]))
+    print(out)
+    return out
 
 
 def make_tileable_horizontal(image, n=3):

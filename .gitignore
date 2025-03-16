@@ -1,9 +1,7 @@
 .idea
 __pycache__
 
+anims
 items
 gens
 models
-
-Real-ESRGAN
-RMBG-1.4

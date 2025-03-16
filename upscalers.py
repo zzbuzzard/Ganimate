@@ -1,7 +1,6 @@
 from abc import abstractmethod, ABC
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from realesrgan import RealESRGANer
-from PIL import Image
 import numpy as np
 
 
